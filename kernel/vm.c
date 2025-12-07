@@ -332,10 +332,12 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       
       // Clear write permission and mark as COW for child too
       flags = (flags & ~PTE_W) | PTE_COW;
-      
-      // Increment reference count for COW pages only
-      krefpage((void*)pa);
     }
+    
+    // Increment reference count for ALL shared pages
+    // This includes both COW pages and read-only pages (text segment)
+    // so they won't be freed when child exits
+    krefpage((void*)pa);
     
     // Map the same physical page in child's page table
     if(mappages(new, i, PGSIZE, pa, flags) != 0){
