@@ -190,6 +190,7 @@ UPROGS=\
 	$U/_zombie\
 	$U/_cowtest\
 	$U/_perftest\
+	$U/_simpletest\
 
 
 

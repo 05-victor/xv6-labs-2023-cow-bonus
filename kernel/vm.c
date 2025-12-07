@@ -325,22 +325,27 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     
-    // If page is writable, make it COW
+    // If page is writable, make it COW for BOTH parent and child
     if(flags & PTE_W) {
-      // Clear write permission and mark as COW
-      flags &= ~PTE_W;
-      flags |= PTE_COW;
-      *pte = PA2PTE(pa) | flags;
+      // Clear write permission and mark as COW in parent's PTE
+      *pte = PA2PTE(pa) | ((flags & ~PTE_W) | PTE_COW);
+      
+      // Clear write permission and mark as COW for child too
+      flags = (flags & ~PTE_W) | PTE_COW;
+      
+      // Increment reference count for COW pages only
+      krefpage((void*)pa);
     }
     
     // Map the same physical page in child's page table
     if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
-    
-    // Increment reference count for the shared page
-    krefpage((void*)pa);
   }
+  
+  // Flush TLB to ensure parent process sees updated permissions
+  sfence_vma();
+  
   return 0;
 
  err:
@@ -515,6 +520,9 @@ cowcopy(pagetable_t pagetable, uint64 va)
 
   // Decrease reference count and free old page if needed
   kfree((void*)pa);
+
+  // Flush TLB entry for this virtual address
+  sfence_vma();
 
   return 0;
 }

@@ -89,11 +89,30 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int refcount;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Only free if reference count reaches 0
+  acquire(&pageref.lock);
+  refcount = pageref.count[pa2idx(pa)];
+  release(&pageref.lock);
+  
+  // During kinit, pages have refcount 0, just free them
+  if(refcount == 0) {
+    // Fill with junk to catch dangling refs.
+    memset(pa, 1, PGSIZE);
+    
+    r = (struct run*)pa;
+    
+    acquire(&kmem.lock);
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+    return;
+  }
+  
+  // Decrement reference count, only free if it reaches 0
   if(kderefpage(pa) > 0)
     return;
 
