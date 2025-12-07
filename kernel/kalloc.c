@@ -23,10 +23,17 @@ struct {
   struct run *freelist;
 } kmem;
 
+// Reference count for each physical page
+struct {
+  struct spinlock lock;
+  int count[(PHYSTOP - KERNBASE) / PGSIZE];
+} pageref;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&pageref.lock, "pageref");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -37,6 +44,41 @@ freerange(void *pa_start, void *pa_end)
   p = (char*)PGROUNDUP((uint64)pa_start);
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
     kfree(p);
+}
+
+// Get reference count index for physical address
+int
+pa2idx(void *pa)
+{
+  return ((uint64)pa - KERNBASE) / PGSIZE;
+}
+
+// Increment reference count for a page
+void
+krefpage(void *pa)
+{
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    return;
+  
+  acquire(&pageref.lock);
+  pageref.count[pa2idx(pa)]++;
+  release(&pageref.lock);
+}
+
+// Decrement reference count and return new count
+int
+kderefpage(void *pa)
+{
+  int count;
+  
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("kderefpage");
+  
+  acquire(&pageref.lock);
+  count = --pageref.count[pa2idx(pa)];
+  release(&pageref.lock);
+  
+  return count;
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -50,6 +92,10 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // Only free if reference count reaches 0
+  if(kderefpage(pa) > 0)
+    return;
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -76,7 +122,9 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    krefpage((void*)r);  // Set reference count to 1
+  }
   return (void*)r;
 }

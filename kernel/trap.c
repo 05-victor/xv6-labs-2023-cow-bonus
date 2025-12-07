@@ -68,9 +68,19 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    setkilled(p);
+    // Check for page fault on COW page (scause == 15 for store page fault)
+    if(r_scause() == 15) {
+      uint64 va = r_stval();
+      if(cowcopy(p->pagetable, PGROUNDDOWN(va)) != 0) {
+        // COW handler failed, kill the process
+        printf("usertrap(): COW page fault failed va=%p pid=%d\n", va, p->pid);
+        setkilled(p);
+      }
+    } else {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      setkilled(p);
+    }
   }
 
   if(killed(p))
