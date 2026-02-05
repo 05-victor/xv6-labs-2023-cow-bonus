@@ -1,4 +1,19 @@
 // Saved registers for kernel context switches.
+
+#define VMASIZE 16
+
+// Virtual Memory Area structure for mmap
+struct vma {
+  uint64 addr;        // Starting virtual address
+  uint64 length;      // Length of mapping
+  int prot;           // Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+  int flags;          // MAP_SHARED or MAP_PRIVATE
+  int fd;             // File descriptor
+  int offset;         // Offset in file
+  int valid;          // -1: invalid/unused, 0: valid
+  struct file *file;  // Pointer to file structure
+};
+
 struct context {
   uint64 ra;
   uint64 sp;
@@ -104,4 +119,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma vmas[VMASIZE];    // Virtual memory areas for mmap
 };

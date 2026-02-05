@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "fcntl.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -55,6 +59,9 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
+      // Initialize all VMA slots as invalid
+      for(int i = 0; i < VMASIZE; i++)
+        p->vmas[i].valid = -1;
   }
 }
 
@@ -288,6 +295,14 @@ fork(void)
     return -1;
   }
 
+  // Copy VMAs and increment file reference counts
+  for(i = 0; i < VMASIZE; i++) {
+    if(p->vmas[i].valid == 0) {
+      p->vmas[i].file = filedup(p->vmas[i].file);
+    }
+  }
+  memmove(np->vmas, p->vmas, sizeof(p->vmas));
+
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
@@ -357,6 +372,34 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // Clean up memory-mapped regions
+  for(int i = 0; i < VMASIZE; i++) {
+    if(p->vmas[i].valid == 0) {
+      uint64 start = p->vmas[i].addr;
+      uint64 end = start + p->vmas[i].length;
+      uint64 length = end - start;
+      
+      // Write back dirty pages for MAP_SHARED
+      for(uint64 sz = 0; sz < length; sz += PGSIZE) {
+        if(walkaddr(p->pagetable, start + sz)) {
+          // Page is mapped
+          if(p->vmas[i].flags == MAP_SHARED && (p->vmas[i].prot & PROT_WRITE)) {
+            // Set file offset before writing
+            uint64 file_offset = p->vmas[i].offset + sz;
+            p->vmas[i].file->off = file_offset;
+            if(filewrite(p->vmas[i].file, start + sz, PGSIZE) <= 0)
+              panic("exit: write back to file error");
+          }
+          uvmunmap(p->pagetable, PGROUNDDOWN(start + sz), 1, 1);
+        }
+      }
+      
+      p->vmas[i].valid = -1;
+      fileclose(p->vmas[i].file);
+      p->sz -= length;
     }
   }
 

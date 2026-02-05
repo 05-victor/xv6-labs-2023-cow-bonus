@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "proc.h"
+#include "file.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -316,8 +321,28 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint64 pa, i;
   uint flags;
   char *mem;
+  struct proc *p = myproc();
+  int j;
+  int is_mmap_addr;
 
   for(i = 0; i < sz; i += PGSIZE){
+    // Check if this address belongs to an mmap region
+    is_mmap_addr = 0;
+    for(j = 0; j < VMASIZE; j++) {
+      if(p->vmas[j].valid == 0) {
+        uint64 start = p->vmas[j].addr;
+        uint64 end = start + p->vmas[j].length;
+        if(i >= start && i < end) {
+          is_mmap_addr = 1;
+          break;
+        }
+      }
+    }
+    
+    // Skip mmap regions (they will be handled by lazy allocation)
+    if(is_mmap_addr)
+      continue;
+
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
@@ -448,4 +473,68 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// Page fault handler for mmap lazy allocation
+int
+pagefault_handler(uint64 va)
+{
+  struct proc *p = myproc();
+  
+  // Check if address is valid (within process bounds and not in stack guard)
+  if(va >= p->sz || va < p->trapframe->sp)
+    return -1;
+
+  // Find the VMA that contains this virtual address
+  int i;
+  for(i = 0; i < VMASIZE; i++) {
+    if(p->vmas[i].valid == 0) {
+      uint64 start = p->vmas[i].addr;
+      uint64 end = start + p->vmas[i].length;
+      if(va >= start && va < end)
+        break;
+    }
+  }
+  
+  if(i == VMASIZE)
+    return -1;  // Not in any VMA
+
+  struct file *f = p->vmas[i].file;
+  
+  // Allocate a physical page
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+  
+  memset(mem, 0, PGSIZE);
+
+  // Calculate file offset for this page
+  uint64 offset = p->vmas[i].offset + (va - p->vmas[i].addr);
+  
+  // Read file content into the page
+  ilock(f->ip);
+  int bytes_read = readi(f->ip, 0, (uint64)mem, PGROUNDDOWN(offset), PGSIZE);
+  iunlock(f->ip);
+  
+  if(bytes_read < 0) {
+    kfree(mem);
+    return -1;
+  }
+
+  // Set page permissions based on VMA protection flags
+  int perm = PTE_V | PTE_U;
+  if(p->vmas[i].prot & PROT_READ)
+    perm |= PTE_R;
+  if(p->vmas[i].prot & PROT_WRITE)
+    perm |= PTE_W;
+  if(p->vmas[i].prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  // Map the page into the page table
+  if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm) == -1) {
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
 }
